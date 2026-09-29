@@ -2,10 +2,10 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <style>
   html{color-scheme:light}
-  body{margin:0; font:14px system-ui, sans-serif}
+  body{margin:0; font:14px system-ui, -apple-system, sans-serif}
   img{max-width:100%}
   [hidden]{display:none!important}
 </style>
@@ -116,6 +116,11 @@
     border-radius:8px; padding:7px 9px;
   }
   input[type=range]{width:100%; accent-color:var(--accent)}
+  .check{
+    display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--fg);
+    cursor:pointer; user-select:none;
+  }
+  .check input{accent-color:var(--accent); width:15px; height:15px; margin:0}
   .seg{display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden}
   .seg button{border:0; border-radius:0; flex:1; background:var(--surface-2); padding:8px 6px}
   .seg button[aria-pressed="true"]{background:var(--accent-soft); color:var(--accent); font-weight:500}
@@ -190,7 +195,12 @@
       <div class="field">
         <label for="voice">목소리</label>
         <select id="voice"></select>
+        <label class="check" for="naturalOnly">
+          <input type="checkbox" id="naturalOnly" checked>
+          <span>Natural 음성만 보기</span>
+        </label>
         <p class="hint" id="voiceHint">목소리 목록을 불러오는 중입니다.</p>
+        <button type="button" id="reload" class="ghost" style="align-self:flex-start">목록 새로고침</button>
       </div>
 
       <div class="field">
@@ -248,6 +258,8 @@
     count: document.getElementById('count'),
     voice: document.getElementById('voice'),
     voiceHint: document.getElementById('voiceHint'),
+    naturalOnly: document.getElementById('naturalOnly'),
+    reload: document.getElementById('reload'),
     rate: document.getElementById('rate'), rateVal: document.getElementById('rateVal'),
     pitch: document.getElementById('pitch'), pitchVal: document.getElementById('pitchVal'),
     reps: document.getElementById('reps'), repsVal: document.getElementById('repsVal'),
@@ -268,7 +280,8 @@
     try {
       localStorage.setItem(KEY, JSON.stringify({
         text: el.text.value, rate: el.rate.value, pitch: el.pitch.value,
-        reps: el.reps.value, gap: el.gap.value, loop: S.loop, voice: el.voice.value
+        reps: el.reps.value, gap: el.gap.value, loop: S.loop, voice: el.voice.value,
+        naturalOnly: el.naturalOnly.checked
       }));
     } catch (e) {}
   }
@@ -334,17 +347,24 @@
 
   /* ---------- 목소리 ---------- */
   var voices = [];
+  function isNatural(v) { return /natural/i.test(v.name || ''); }
+
   function fillVoices(preferURI) {
     var all = synth ? synth.getVoices() : [];
     if (!all.length) return false;
 
-    var natural = all.filter(function (v) { return /natural/i.test(v.name || ''); });
-    var naturalOnly = natural.length > 0;
-    voices = naturalOnly ? natural : all;
+    var natural = all.filter(isNatural);
+    var want = el.naturalOnly.checked && natural.length > 0;
 
-    el.voiceHint.textContent = naturalOnly
-      ? 'Natural(신경망) 음성만 골라 놓았습니다 — ' + natural.length + '개.'
-      : '이 브라우저에는 Natural 음성이 없어서 전체 목록을 보여 줍니다. Microsoft Edge에서 열면 Natural 음성을 쓸 수 있습니다.';
+    if (el.naturalOnly.checked && !natural.length) {
+      el.voiceHint.textContent = '이 브라우저에는 Natural 음성이 없어서 이 기기의 음성 ' + all.length + '개를 보여 줍니다. Microsoft Edge에서 열면 Natural 음성이 나타납니다.';
+    } else if (want) {
+      el.voiceHint.textContent = 'Natural(신경망) 음성 ' + natural.length + '개만 보이는 중입니다.';
+    } else {
+      el.voiceHint.textContent = '이 기기의 음성 ' + all.length + '개를 모두 보여 줍니다' + (natural.length ? ' (★ 표시가 Natural ' + natural.length + '개).' : '.');
+    }
+
+    voices = want ? natural : all;
 
     var en = [], rest = [];
     voices.forEach(function (v) { (/^en/i.test(v.lang) ? en : rest).push(v); });
@@ -356,7 +376,7 @@
       list.forEach(function (v) {
         var o = document.createElement('option');
         o.value = v.voiceURI;
-        o.textContent = v.name + ' (' + v.lang + ')';
+        o.textContent = (isNatural(v) ? '★ ' : '') + v.name + ' (' + v.lang + ')';
         g.appendChild(o);
       });
       el.voice.appendChild(g);
@@ -390,18 +410,25 @@
   var keepAlive = null;
   function clearTimer() { if (S.timer) { clearTimeout(S.timer); S.timer = null; } }
 
+  // 취소된 발화의 onend가 다음 문장으로 넘겨 버리지 않도록 세대 번호로 구분한다
+  var gen = 0;
+
   function speak() {
     if (!synth || !S.sentences.length) return;
+    clearTimer();
+    gen++;
+    var mine = gen;
     synth.cancel();
     var u = new SpeechSynthesisUtterance(S.sentences[S.idx]);
     var v = currentVoice();
     if (v) { u.voice = v; u.lang = v.lang; }
     u.rate = +el.rate.value;
     u.pitch = +el.pitch.value;
-    u.onend = function () { if (S.playing && !S.paused) afterOne(); };
-    u.onerror = function () { if (S.playing) afterOne(); };
+    u.onend = function () { if (mine === gen && S.playing && !S.paused) afterOne(); };
+    u.onerror = function () { if (mine === gen && S.playing) afterOne(); };
     S.u = u;
-    synth.speak(u);
+    // cancel() 직후 곧바로 speak()하면 일부 브라우저가 첫 음절을 놓쳐서 한 박자 띄운다
+    setTimeout(function () { if (mine === gen) synth.speak(u); }, 60);
     paint();
   }
 
@@ -429,6 +456,7 @@
   }
   function stopAll() {
     S.playing = false; S.paused = false; S.rep = 1;
+    gen++;
     clearTimer();
     if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
     if (synth) synth.cancel();
@@ -459,7 +487,10 @@
   var t;
   el.text.addEventListener('input', function () {
     clearTimeout(t);
-    t = setTimeout(function () { renderSentences(); save(); }, 250);
+    t = setTimeout(function () {
+      if (S.playing) stopAll();   // 문장 목록이 바뀌면 읽던 위치가 어긋나므로 멈춘다
+      renderSentences(); save();
+    }, 250);
   });
   el.clear.addEventListener('click', function () {
     stopAll(); el.text.value = ''; S.idx = 0; renderSentences(); save(); el.text.focus();
@@ -468,18 +499,28 @@
     stopAll(); el.text.value = SAMPLE; S.idx = 0; renderSentences(); save();
   });
 
-  function bindRange(input, out, fmt) {
+  function bindRange(input, out, fmt, live) {
     var upd = function () { out.textContent = fmt(input.value); };
     input.addEventListener('input', function () { upd(); paint(); });
-    input.addEventListener('change', save);
+    input.addEventListener('change', function () {
+      save();
+      if (live && S.playing && !S.paused) speak();   // 새 값으로 현재 문장을 다시 읽는다
+    });
     upd();
   }
-  bindRange(el.rate, el.rateVal, function (v) { return (+v).toFixed(2) + '×'; });
-  bindRange(el.pitch, el.pitchVal, function (v) { return (+v).toFixed(1); });
+  bindRange(el.rate, el.rateVal, function (v) { return (+v).toFixed(2) + '×'; }, true);
+  bindRange(el.pitch, el.pitchVal, function (v) { return (+v).toFixed(1); }, true);
   bindRange(el.reps, el.repsVal, function (v) { return v + '회'; });
   bindRange(el.gap, el.gapVal, function (v) { return (+v).toFixed(1) + '초'; });
 
   el.voice.addEventListener('change', function () {
+    save();
+    if (S.playing && !S.paused) speak();
+  });
+
+  el.naturalOnly.addEventListener('change', function () {
+    var keep = el.voice.value;
+    fillVoices(keep);
     save();
     if (S.playing && !S.paused) speak();
   });
@@ -511,6 +552,7 @@
     if (saved.pitch) el.pitch.value = saved.pitch;
     if (saved.reps) el.reps.value = saved.reps;
     if (saved.gap !== undefined) el.gap.value = saved.gap;
+    if (saved.naturalOnly !== undefined) el.naturalOnly.checked = !!saved.naturalOnly;
   }
   el.rate.dispatchEvent(new Event('input'));
   el.pitch.dispatchEvent(new Event('input'));
@@ -525,14 +567,19 @@
     el.play.disabled = true;
   } else {
     var prefer = saved && saved.voice;
-    if (!fillVoices(prefer)) {
-      synth.addEventListener('voiceschanged', function once() {
-        synth.removeEventListener('voiceschanged', once);
-        if (!fillVoices(prefer)) {
-          el.voiceHint.textContent = '목소리 목록을 불러오지 못했습니다. 새로고침해 보세요.';
-        }
-      });
-    }
+    var ok = fillVoices(prefer);
+    if (!ok) el.voiceHint.textContent = '목소리 목록을 불러오는 중입니다…';
+
+    // Edge는 온라인 Natural 음성을 조금 늦게 추가하므로 계속 듣고 있다가 다시 채운다
+    synth.addEventListener('voiceschanged', function () {
+      fillVoices(el.voice.value || prefer);
+    });
+    el.reload.addEventListener('click', function () {
+      if (!fillVoices(el.voice.value || prefer)) {
+        el.voiceHint.textContent = '아직 목소리를 찾지 못했습니다. 한 번 재생해 본 뒤 다시 눌러 보세요.';
+      }
+    });
+    setTimeout(function () { fillVoices(el.voice.value || prefer); }, 1200);
   }
 })();
 </script>
